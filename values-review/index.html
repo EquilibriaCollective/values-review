@@ -59,14 +59,6 @@
 
   .masthead { display: flex; flex-direction: column; align-items: center; }
   .masthead img { width: 220px; max-width: 100%; height: auto; display: block; }
-  .subbrand {
-    margin-top: 0.75rem;
-    text-align: center;
-    font-size: 0.62rem;
-    letter-spacing: 0.2em;
-    color: var(--text-muted);
-    font-weight: 600;
-  }
 
   #content { flex: 1; padding-top: 2rem; }
 
@@ -352,7 +344,6 @@
   <div class="wrap">
     <header class="masthead">
       <img id="logo" alt="Equilibria Collective. A new balance for modern leadership.">
-      <div class="subbrand">ELLA THURSTON COACHING</div>
     </header>
 
     <main id="content"></main>
@@ -880,7 +871,6 @@ function buildDocx(data, logoBytes) {
   if (logoBytes) body += logoPara(2011680, 502920); // 2.2in wide, 4:1 ratio
 
   body += para("Values Review", { font: "Georgia", size: 44, after: 40 });
-  body += para("Ella Thurston Coaching", { size: 20, color: "7A7468", after: 40 });
   body += para(data.date, { size: 18, color: "7A7468", after: 120 });
   body += rule();
 
@@ -904,7 +894,7 @@ function buildDocx(data, logoBytes) {
     { size: 18, italic: true, color: "7A7468", after: 80 }
   );
   body += para(
-    "Ella Thurston Coaching is a service line of Equilibria Collective Pty Limited (ACN 695 621 160).",
+    "Equilibria Collective Pty Limited (ACN 695 621 160).",
     { size: 15, color: "7A7468", after: 0 }
   );
 
@@ -957,8 +947,7 @@ function buildDocx(data, logoBytes) {
 function buildExportText() {
   var lines = [];
   lines.push("VALUES REVIEW");
-  lines.push("Ella Thurston Coaching");
-  lines.push("A service line of Equilibria Collective Pty Limited (ACN 695 621 160)");
+  lines.push("Equilibria Collective Pty Limited (ACN 695 621 160)");
   lines.push(todayLabel);
   lines.push("");
   S.finalValues.forEach(function (v) {
