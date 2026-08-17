@@ -735,6 +735,223 @@ function actionsContinue() {
   render();
 }
 
+/* ---------------- .docx export (no dependencies) ----------------
+   A .docx is a ZIP of XML parts. We write entries uncompressed (store),
+   so no deflate implementation is needed. */
+
+var CRC_TABLE = (function () {
+  var t = new Uint32Array(256);
+  for (var n = 0; n < 256; n++) {
+    var c = n;
+    for (var k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(bytes) {
+  var c = 0xffffffff;
+  for (var i = 0; i < bytes.length; i++) {
+    c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function utf8(str) {
+  return new TextEncoder().encode(str);
+}
+
+function zipStore(entries) {
+  var chunks = [];
+  var central = [];
+  var offset = 0;
+
+  function u16(n) { return [n & 0xff, (n >>> 8) & 0xff]; }
+  function u32(n) { return [n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 0xff, (n >>> 24) & 0xff]; }
+
+  var now = new Date();
+  var dosTime = ((now.getHours() & 0x1f) << 11) | ((now.getMinutes() & 0x3f) << 5) |
+                ((now.getSeconds() / 2) & 0x1f);
+  var dosDate = (((now.getFullYear() - 1980) & 0x7f) << 9) |
+                (((now.getMonth() + 1) & 0x0f) << 5) | (now.getDate() & 0x1f);
+
+  entries.forEach(function (e) {
+    var nameBytes = utf8(e.name);
+    var data = e.data;
+    var crc = crc32(data);
+
+    var local = [].concat(
+      u32(0x04034b50), u16(20), u16(0x0800), u16(0),
+      u16(dosTime), u16(dosDate),
+      u32(crc), u32(data.length), u32(data.length),
+      u16(nameBytes.length), u16(0)
+    );
+    chunks.push(new Uint8Array(local), nameBytes, data);
+
+    central.push([].concat(
+      u32(0x02014b50), u16(20), u16(20), u16(0x0800), u16(0),
+      u16(dosTime), u16(dosDate),
+      u32(crc), u32(data.length), u32(data.length),
+      u16(nameBytes.length), u16(0), u16(0),
+      u16(0), u16(0), u32(0),
+      u32(offset)
+    ));
+    central[central.length - 1].nameBytes = nameBytes;
+    offset += local.length + nameBytes.length + data.length;
+  });
+
+  var cdStart = offset;
+  var cdSize = 0;
+  central.forEach(function (c) {
+    chunks.push(new Uint8Array(c), c.nameBytes);
+    cdSize += c.length + c.nameBytes.length;
+  });
+
+  chunks.push(new Uint8Array([].concat(
+    u32(0x06054b50), u16(0), u16(0),
+    u16(entries.length), u16(entries.length),
+    u32(cdSize), u32(cdStart), u16(0)
+  )));
+
+  var total = chunks.reduce(function (n, c) { return n + c.length; }, 0);
+  var out = new Uint8Array(total);
+  var p = 0;
+  chunks.forEach(function (c) { out.set(c, p); p += c.length; });
+  return out;
+}
+
+function xmlEsc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+
+/* ---- paragraph helpers (Equilibria Collective styling) ---- */
+
+function para(text, opt) {
+  opt = opt || {};
+  var rPr = "<w:rPr>";
+  rPr += '<w:rFonts w:ascii="' + (opt.font || "Arial") + '" w:hAnsi="' + (opt.font || "Arial") + '"/>';
+  if (opt.bold) rPr += "<w:b/>";
+  if (opt.italic) rPr += "<w:i/>";
+  if (opt.caps) rPr += "<w:caps/>";
+  if (opt.spacing) rPr += '<w:spacing w:val="' + opt.spacing + '"/>';
+  rPr += '<w:color w:val="' + (opt.color || "3A352F") + '"/>';
+  rPr += '<w:sz w:val="' + (opt.size || 22) + '"/><w:szCs w:val="' + (opt.size || 22) + '"/>';
+  rPr += "</w:rPr>";
+
+  var pPr = '<w:pPr><w:spacing w:before="' + (opt.before || 0) +
+            '" w:after="' + (opt.after || 120) + '" w:line="276" w:lineRule="auto"/>';
+  if (opt.align) pPr += '<w:jc w:val="' + opt.align + '"/>';
+  if (opt.indent) pPr += '<w:ind w:left="' + opt.indent + '"/>';
+  pPr += "</w:pPr>";
+
+  return "<w:p>" + pPr + "<w:r>" + rPr +
+         '<w:t xml:space="preserve">' + xmlEsc(text) + "</w:t></w:r></w:p>";
+}
+
+function rule() {
+  return '<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="CEDFBB"/>' +
+         '</w:pBdr><w:spacing w:before="120" w:after="240"/></w:pPr></w:p>';
+}
+
+function logoPara(cx, cy) {
+  return '<w:p><w:pPr><w:spacing w:after="240"/></w:pPr><w:r><w:drawing>' +
+    '<wp:inline distT="0" distB="0" distL="0" distR="0">' +
+    '<wp:extent cx="' + cx + '" cy="' + cy + '"/>' +
+    '<wp:effectExtent l="0" t="0" r="0" b="0"/>' +
+    '<wp:docPr id="1" name="Equilibria Collective logo"/>' +
+    '<wp:cNvGraphicFramePr><a:graphicFrameLocks xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" noChangeAspect="1"/></wp:cNvGraphicFramePr>' +
+    '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">' +
+    '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+    '<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+    '<pic:nvPicPr><pic:cNvPr id="0" name="logo.png"/><pic:cNvPicPr/></pic:nvPicPr>' +
+    '<pic:blipFill><a:blip r:embed="rId5"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>' +
+    '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="' + cx + '" cy="' + cy + '"/></a:xfrm>' +
+    '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>' +
+    "</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>";
+}
+
+/* ---- the document ---- */
+
+function buildDocx(data, logoBytes) {
+  var body = "";
+
+  if (logoBytes) body += logoPara(2011680, 502920); // 2.2in wide, 4:1 ratio
+
+  body += para("Values Review", { font: "Georgia", size: 44, after: 40 });
+  body += para("Ella Thurston Coaching", { size: 20, color: "7A7468", after: 40 });
+  body += para(data.date, { size: 18, color: "7A7468", after: 120 });
+  body += rule();
+
+  data.values.forEach(function (v, i) {
+    body += para(v.name, { font: "Georgia", size: 30, before: i ? 320 : 0, after: 60 });
+    body += para("Alignment last month: " + v.score + "/10",
+                 { size: 20, bold: true, color: "7A9E82", after: v.reflection ? 60 : 120 });
+    if (v.reflection) {
+      body += para(v.reflection, { size: 20, italic: true, color: "3A352F", after: 140 });
+    }
+    body += para("Actions for the next month",
+                 { size: 16, bold: true, caps: true, spacing: 30, color: "7A7468", after: 60 });
+    v.actions.forEach(function (a, n) {
+      body += para(n + 1 + ".  " + a, { size: 20, indent: 340, after: 60 });
+    });
+  });
+
+  body += rule();
+  body += para(
+    "A values audit is a snapshot rather than a verdict. Scores move when actions do.",
+    { size: 18, italic: true, color: "7A7468", after: 80 }
+  );
+  body += para(
+    "Ella Thurston Coaching is a service line of Equilibria Collective Pty Limited (ACN 695 621 160).",
+    { size: 15, color: "7A7468", after: 0 }
+  );
+
+  var document_xml =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+    'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">' +
+    "<w:body>" + body +
+    '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+    '<w:pgMar w:top="1418" w:right="1418" w:bottom="1418" w:left="1418" w:header="709" w:footer="709" w:gutter="0"/>' +
+    "</w:sectPr></w:body></w:document>";
+
+  var content_types =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Default Extension="png" ContentType="image/png"/>' +
+    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+    "</Types>";
+
+  var root_rels =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+    "</Relationships>";
+
+  var doc_rels =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    (logoBytes
+      ? '<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/logo.png"/>'
+      : "") +
+    "</Relationships>";
+
+  var entries = [
+    { name: "[Content_Types].xml", data: utf8(content_types) },
+    { name: "_rels/.rels", data: utf8(root_rels) },
+    { name: "word/document.xml", data: utf8(document_xml) },
+    { name: "word/_rels/document.xml.rels", data: utf8(doc_rels) }
+  ];
+  if (logoBytes) entries.push({ name: "word/media/logo.png", data: logoBytes });
+
+  return zipStore(entries);
+}
+
 /* ============================== export =========================== */
 
 function buildExportText() {
@@ -785,14 +1002,47 @@ function copyResults() {
   }
 }
 
+function logoBytes() {
+  try {
+    var b64 = EC_LOGO_SRC.split("base64,")[1];
+    var bin = atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  } catch (e) { return null; }
+}
+
 function downloadResults() {
-  var text = buildExportText();
+  var payload = {
+    date: todayLabel,
+    values: S.finalValues.map(function (v) {
+      var a = S.alignment[v.name] || {};
+      return {
+        name: v.name,
+        score: a.score != null ? a.score : "n/a",
+        reflection: (a.reflection || "").trim(),
+        actions: (S.actions[v.name] || []).filter(function (x) { return x && x.trim(); })
+                   .map(function (x) { return x.trim(); })
+      };
+    })
+  };
+
   var dateStr = new Date().toISOString().slice(0, 10);
-  var blob = new Blob([text], { type: "text/plain" });
+  var blob, filename;
+  try {
+    blob = new Blob([buildDocx(payload, logoBytes())], {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    });
+    filename = "values-review-" + dateStr + ".docx";
+  } catch (e) {
+    blob = new Blob([buildExportText()], { type: "text/plain" });
+    filename = "values-review-" + dateStr + ".txt";
+  }
+
   var url = URL.createObjectURL(blob);
   var a = document.createElement("a");
   a.href = url;
-  a.download = "values-review-" + dateStr + ".txt";
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
